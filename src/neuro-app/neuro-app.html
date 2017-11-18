@@ -90,7 +90,7 @@
       }
       #optionsMenu {
         position: absolute;
-        height: 200px;
+        height: 380px;
         width: 384px;
         top: calc(50% - 100px);
         left: calc(50% - 150px);
@@ -192,6 +192,11 @@
               return {
                 fontSize: 14,
                 selectLastCommand: false,
+                muteAudio: false,
+                volume: {
+                  background: 100,
+                  foreground: 100,
+                }
               };
             },
           },
@@ -218,20 +223,43 @@
         };
       }
 
+      static get observers() {
+        return [
+          '_mutedChanged(options.muteAudio)',
+          '_volumeChanged(options.volume.background, options.volume.foreground)'
+        ];
+      }
+
       ready() {
         super.ready();
         this.ansi_up = new AnsiUp;
         this.ansi_up.use_classes = true;
         this._history = [];
         this._historyIndex = 0;
+        this.foregroundAudio = [];
+        this.backgroundAudio = document.createElement('audio');
         if (typeof require === 'function') {
           var Store = require('electron-store');
           this.store = new Store;
           this.options = this.store.get('options', {
             fontSize: 14,
             selectLastCommand: false,
+            muteAudio: false,
+            volume: {
+              background: 100,
+              foreground: 100
+            }
           });
         }
+
+        this.foregroundAudio.muted = this.options.muteAudio;
+        this.backgroundAudio.muted = this.options.muteAudio;
+        this.foregroundAudio.volume = (this.options.volume.foreground / 100);
+        this.backgroundAudio.volume = (this.options.volume.background / 100);
+      }
+
+      get maximumForegroundAudioTracks() {
+        return 10;
       }
 
       connect() {
@@ -271,12 +299,73 @@
         this.$.output.scrollTop = this.$.output.scrollHeight;
       }
 
+      playAudio(audioCue, options = {}) {
+        const {
+          background = false,
+          looping    = false,
+          stop       = false,
+          volume     = 1 // multiplier, only applied to foreground sfx
+        } = options;
+
+        const audio = background
+          ? this.backgroundAudio
+          : this.foregroundAudio;
+
+        const filetype = (audioCue || '').includes('.')
+          ? ''
+          : '.mp3';
+
+        // Handle a request to stop background audio, and then return if we're not playing anything new.
+        if (stop) {
+          console.log('Stopping background audio.');
+          this.backgroundAudio.pause();
+          this.backgroundAudio.src = '';
+          console.log('Audio cue is ', audioCue);
+          if (!audioCue) {
+            return;
+          }
+        }
+
+        if (background) {
+          audio.pause();
+          play(audio, audioCue, looping);
+        } else {
+          if (audio.length > this.maximumForegroundAudioTracks) {
+            let oldest = audio.shift();
+            oldest.pause();
+            oldest = null;
+          }
+          const newTrack = document.createElement('audio');
+          audio.push(newTrack);
+
+          const maxVolume = this.options.volume.foreground / 100;
+          const calculatedVolume = maxVolume * volume;
+          console.log('Calculating ' + audioCue + ' volume to be ' + calculatedVolume + ' out of maximum ' + maxVolume);
+          newTrack.volume = Math.max(0, Math.min(maxVolume, calculatedVolume));
+          play(newTrack, audioCue, looping);
+        }
+
+        function play(audioTrack, audioCue, looping) {
+          audioTrack.src = './assets/audio/' + audioCue + filetype;
+          audioTrack.loop = looping || false;
+          audioTrack.play();
+        }
+      }
+
       _wsOnMessage(e) {
-        var data = JSON.parse(e.data);
-        if (data.type === 'message') {
-          this.writeOutput(data.message);
-        } else if (data.type === 'data') {
-          this.playerData = data.data;
+        const data = JSON.parse(e.data);
+        switch (data.type) {
+          case 'message':
+            this.writeOutput(data.message);
+            break;
+          case 'data':
+            this.playerData = data.data;
+            break;
+          case 'audio':
+            this.playAudio(data.audioCue, data.options);
+            break;
+          default:
+            console.log('Unknown WS message received: ', data);
         }
       }
 
@@ -369,6 +458,22 @@
 
       _closeOptions() {
         this._optionsOpen = false;
+      }
+
+      _mutedChanged(muteAudio) {
+        if (this.backgroundAudio && this.foregroundAudio) {
+          this.backgroundAudio.muted = muteAudio;
+          this.foregroundAudio.muted = muteAudio;
+        }
+      }
+
+      _volumeChanged(backgroundChange, foregroundChange) {
+        if (this.backgroundAudio && this.foregroundAudio) {
+          backgroundChange = backgroundChange && isFinite(backgroundChange) || this.backgroundAudio.volume;
+          foregroundChange = foregroundChange && isFinite(foregroundChange) || this.foregroundAudio.volume;
+          this.backgroundAudio.volume = (backgroundChange / 100);
+          this.foregroundAudio.volume = (foregroundChange / 100);
+        }
       }
 
       _optionsSaved() {
